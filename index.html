@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>London Underground – p5.js</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+</head>
+<body>
+<script>
+// ================================================
+// LONDON UNDERGROUND – FULL LINE VIEWER (p5.js)
+// ================================================
+
+// ⚙️ ADJUSTABLE DENSITY
+let trainsPerLine = 45;
+
+// Data structures
+let stationMap = {};                  // id → Station
+let lineMap = {};                     // lineId → Line
+let connections = {};                 // "fromStationId:lineId" → [toStationId, …]
+let trains = [];
+let lineGroupMap = {};                // lineId → group name
+let groupNames = [];
+let selectedGroup = null;             // null = all lines
+
+// CSV tables (loaded in preload)
+let routeTable, stationTable, linkTable;
+
+// ================================================
+// CLASSES
+// ================================================
+class Station {
+  constructor(id, name, x, y) {
+    this.id = id;
+    this.name = name;
+    this.pos = createVector(x, y);
+  }
+}
+
+class Line {
+  constructor(name, col) {
+    this.name = name;
+    this.c = col;   // p5.Color object
+  }
+}
+
+class Train {
+  constructor(lineId, lineName, col, startStationId) {
+    this.lineId = lineId;
+    this.lineName = lineName;
+    this.trainColor = col;
+    this.currentStationId = startStationId;
+    this.previousStationId = -1;
+    this.currentPos = stationMap[startStationId].pos.copy();
+    this.targetPos = null;
+    this.speed = 2.0;
+    this.pickNewTarget();
+  }
+
+  pickNewTarget() {
+    let key = this.currentStationId + ':' + this.lineId;
+    let nextOptions = connections[key];
+    if (!nextOptions || nextOptions.length === 0) {
+      this.targetPos = null;
+      return;
+    }
+    // avoid immediate U‑turn
+    let validOptions = [];
+    for (let id of nextOptions) {
+      if (id !== this.previousStationId) validOptions.push(id);
+    }
+    let nextId;
+    if (validOptions.length > 0) {
+      nextId = validOptions[Math.floor(random(validOptions.length))];
+    } else {
+      nextId = this.previousStationId; // dead end, must turn back
+    }
+    this.targetPos = stationMap[nextId].pos.copy();
+    this.previousStationId = this.currentStationId;
+    this.currentStationId = nextId;
+  }
+
+  update() {
+    if (!this.targetPos) return;
+    let dir = p5.Vector.sub(this.targetPos, this.currentPos);
+    let dist = dir.mag();
+    if (dist < this.speed) {
+      this.currentPos = this.targetPos.copy();
+      this.pickNewTarget();
+    } else {
+      dir.normalize();
+      dir.mult(this.speed);
+      this.currentPos.add(dir);
+    }
+  }
+
+  display() {
+    noStroke();
+    fill(this.trainColor);
+    ellipse(this.currentPos.x, this.currentPos.y, 10, 10);
+  }
+}
+
+// ================================================
+// PRELOAD (load CSVs before setup)
+// ================================================
+function preload() {
+  routeTable = loadTable('routes.csv', 'csv', 'header');
+  stationTable = loadTable('stations.csv', 'csv', 'header');
+  linkTable = loadTable('links.csv', 'csv', 'header');
+}
+
+// ================================================
+// SETUP
+// ================================================
+function setup() {
+  createCanvas(1200, 1000);
+  background(230);
+
+  // --- Parse routes (colours) ---
+  for (let i = 0; i < routeTable.getRowCount(); i++) {
+    let row = routeTable.getRow(i);
+    let lineId = row.getString('id');
+    let lineName = row.getString('name');
+    let c;
+    switch (lineId) {
+      case '1':  c = color(178, 99, 5);    break;
+      case '2':  c = color(220, 36, 31);   break;
+      case '3':  c = color(255, 211, 0);   break;
+      case '4':  c = color(0, 114, 41);    break;
+      case '5':  c = color(243, 186, 34);  break;
+      case '6':  c = color(244, 169, 190); break;
+      case '7':  c = color(134, 143, 152); break;
+      case '8':  c = color(155, 0, 86);    break;
+      case '9':  c = color(0, 0, 0);       break;
+      case '10': c = color(0, 25, 168);    break;
+      case '11': c = color(0, 160, 226);   break;
+      case '12': c = color(147, 206, 186); break;
+      case '13': c = color(0, 175, 173);   break;
+      // branch variants (share parent colour)
+      case '14': case '15': case '16': case '17': c = color(0, 0, 0); break;
+      case '18': case '19': case '20': case '21': case '22': case '23': c = color(220, 36, 31); break;
+      case '24': case '25': case '26': case '27': c = color(155, 0, 86); break;
+      case '28': case '29': case '30': case '31': c = color(0, 114, 41); break;
+      case '32': case '33': case '34': case '35': case '36': case '37': case '38': c = color(0, 175, 173); break;
+      default: c = color(255, 255, 255);
+    }
+    lineMap[lineId] = new Line(lineName, c);
+  }
+
+  // --- Group line IDs into main lines (like Bakerloo, Central, etc.) ---
+  for (let id in lineMap) {
+    let name = lineMap[id].name;
+    let group = 'Other';
+    if (name.includes('Bakerloo')) group = 'Bakerloo Line';
+    else if (name.includes('Central')) group = 'Central Line';
+    else if (name.includes('Circle')) group = 'Circle Line';
+    else if (name.includes('District')) group = 'District Line';
+    else if (name.includes('Hammersmith')) group = 'Hammersmith & City Line';
+    else if (name.includes('Jubilee')) group = 'Jubilee Line';
+    else if (name.includes('Metropolitan')) group = 'Metropolitan Line';
+    else if (name.includes('Northern')) group = 'Northern Line';
+    else if (name.includes('Piccadilly')) group = 'Piccadilly Line';
+    else if (name.includes('Victoria')) group = 'Victoria Line';
+    else if (name.includes('Waterloo')) group = 'Waterloo & City Line';
+    else if (name.includes('DLR') || name.includes('Docklands')) group = 'DLR';
+    else if (name.includes('East London')) group = 'East London Line';
+    lineGroupMap[id] = group;
+  }
+
+  // Build sorted list of unique group names
+  let groupSet = new Set(Object.values(lineGroupMap));
+  groupNames = Array.from(groupSet).sort();
+
+  // --- Load stations (lat/lon → screen) ---
+  let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
+  for (let i = 0; i < stationTable.getRowCount(); i++) {
+    let row = stationTable.getRow(i);
+    let lat = row.getNum('latitude');
+    let lon = row.getNum('longitude');
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+    if (lon < minLon) minLon = lon;
+    if (lon > maxLon) maxLon = lon;
+  }
+  let pad = 0.1;
+  let latPad = (maxLat - minLat) * pad;
+  let lonPad = (maxLon - minLon) * pad;
+  minLat -= latPad; maxLat += latPad;
+  minLon -= lonPad; maxLon += lonPad;
+
+  for (let i = 0; i < stationTable.getRowCount(); i++) {
+    let row = stationTable.getRow(i);
+    let id = row.getNum('id');
+    let name = row.getString('name');
+    let lat = row.getNum('latitude');
+    let lon = row.getNum('longitude');
+    let x = map(lon, minLon, maxLon, 0, width);
+    let y = map(lat, minLat, maxLat, height, 0);
+    stationMap[id] = new Station(id, name, x, y);
+  }
+
+  // --- Load links (connections) ---
+  for (let i = 0; i < linkTable.getRowCount(); i++) {
+    let row = linkTable.getRow(i);
+    let fromId = row.getNum('station1');
+    let toId = row.getNum('station2');
+    let lineId = row.getString('line');
+
+    let keyF = fromId + ':' + lineId;
+    if (!connections[keyF]) connections[keyF] = [];
+    connections[keyF].push(toId);
+
+    let keyB = toId + ':' + lineId;
+    if (!connections[keyB]) connections[keyB] = [];
+    connections[keyB].push(fromId);
+  }
+
+  // --- Create trains ---
+  for (let lineId in lineMap) {
+    let startId = -1;
+    for (let i = 0; i < linkTable.getRowCount(); i++) {
+      if (linkTable.getRow(i).getString('line') === lineId) {
+        startId = linkTable.getRow(i).getNum('station1');
+        break;
+      }
+    }
+    if (startId !== -1 && stationMap[startId]) {
+      let line = lineMap[lineId];
+      for (let i = 0; i < trainsPerLine; i++) {
+        let t = new Train(lineId, line.name, line.c, startId);
+        // stagger trains
+        for (let step = 0; step < i * 3; step++) t.update();
+        trains.push(t);
+      }
+    }
+  }
+}
+
+// ================================================
+// DRAW
+// ================================================
+function draw() {
+  background(230);
+
+  // Draw path for selected group
+  if (selectedGroup) {
+    drawGroupPath(selectedGroup);
+  }
+
+  // Update and display trains
+  for (let t of trains) {
+    t.update();   // always move, even if invisible
+    if (!selectedGroup || lineGroupMap[t.lineId] === selectedGroup) {
+      t.display();
+    }
+  }
+
+  // On‑screen info
+  fill(50);
+  textSize(12);
+  textAlign(LEFT, TOP);
+  let status;
+  if (!selectedGroup) {
+    status = 'Showing ALL lines | TAB = cycle groups | BACKSPACE = show all';
+  } else {
+    status = 'Line: ' + selectedGroup + ' | TAB = next group | BACKSPACE = show all';
+  }
+  text(status, 10, 10);
+  text('Groups: ' + groupNames.length, 10, 28);
+}
+
+// ================================================
+// DRAW FULL PATH FOR A GROUP (all its line IDs)
+// ================================================
+function drawGroupPath(group) {
+  // Find a colour – pick the colour of the first line ID in this group
+  let groupColor = color(255);
+  for (let id in lineGroupMap) {
+    if (lineGroupMap[id] === group) {
+      groupColor = lineMap[id].c;
+      break;
+    }
+  }
+
+  strokeWeight(1.5);
+  stroke(groupColor.levels[0], groupColor.levels[1], groupColor.levels[2], 70); // semi‑transparent
+  for (let key in connections) {
+    let parts = key.split(':');
+    let lineId = parts[1];
+    if (lineGroupMap[lineId] !== group) continue;
+    let fromId = parseInt(parts[0]);
+    if (!stationMap[fromId]) continue;
+    let fromPos = stationMap[fromId].pos;
+    for (let toId of connections[key]) {
+      if (!stationMap[toId]) continue;
+      let toPos = stationMap[toId].pos;
+      line(fromPos.x, fromPos.y, toPos.x, toPos.y);
+    }
+  }
+  noStroke();
+}
+
+// ================================================
+// KEYBOARD CONTROLS
+// ================================================
+function keyPressed() {
+  if (keyCode === TAB) {
+    // Cycle to next group
+    if (!selectedGroup) {
+      selectedGroup = groupNames[0];
+    } else {
+      let idx = groupNames.indexOf(selectedGroup);
+      idx = (idx + 1) % groupNames.length;
+      selectedGroup = groupNames[idx];
+    }
+    // Prevent default tab behaviour (changing focus)
+    return false;
+  } else if (keyCode === BACKSPACE) {
+    selectedGroup = null;
+    return false;
+  }
+}
+</script>
+</body>
+</html>
