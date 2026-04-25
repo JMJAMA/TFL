@@ -295,7 +295,7 @@ function drawGroupPath(group) {
     for (let toId of connections[key]) {
       if (!stationMap[toId]) continue;
       let toPos = stationMap[toId].pos;
-      line(fromPos.x, fromPos.y, toPos.x, toPos.y);
+     // line(fromPos.x, fromPos.y, toPos.x, toPos.y);
     }
   }
   noStroke();
